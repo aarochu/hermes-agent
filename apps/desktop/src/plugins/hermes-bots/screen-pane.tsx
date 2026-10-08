@@ -31,6 +31,7 @@ import {
   viewerHash
 } from './screen-connection'
 import { ScreenInstallCard } from './screen-install'
+import { bindPasteShortcut } from './screen-paste'
 import {
   $screenState,
   beginScreenStatusRequest,
@@ -53,6 +54,7 @@ type RfbLike = {
   disconnect: () => void
   focus: () => void
   clipboardPasteFrom: (text: string) => void
+  sendKey: (keysym: number, code: string, down: boolean) => void
 }
 
 type ConnState = 'idle' | 'attaching' | 'live' | 'error'
@@ -288,6 +290,16 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
         // paste after control changes hands mid-session is silently dropped, same as the gateway's
         // own lease-gated RFB filter would drop it.
         const pasteTarget = canvasHost.current
+        // Last text sent as ClientCutText. The Ctrl/Cmd+V shortcut (screen-paste.ts) re-sends only
+        // a changed clipboard, so a copy made on the screen itself is not overwritten by a stale one.
+        let lastPushed: string | undefined
+
+        const pushChanged = (text: string) => {
+          if (text.length <= MAX_PASTE_CUT_TEXT && text !== lastPushed) {
+            client.clipboardPasteFrom(text)
+            lastPushed = text
+          }
+        }
 
         const handlePaste = (event: ClipboardEvent) => {
           if (client.viewOnly) {
@@ -299,11 +311,21 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
           if (text && text.length <= MAX_PASTE_CUT_TEXT) {
             event.preventDefault()
             client.clipboardPasteFrom(text)
+            lastPushed = text
           }
         }
 
         pasteTarget.addEventListener('paste', handlePaste)
-        pasteCleanup.current = () => pasteTarget.removeEventListener('paste', handlePaste)
+        const desktop = window.hermesDesktop
+
+        const unbindShortcut = desktop?.readClipboard
+          ? bindPasteShortcut(pasteTarget, client, pushChanged, () => desktop.readClipboard())
+          : undefined
+
+        pasteCleanup.current = () => {
+          pasteTarget.removeEventListener('paste', handlePaste)
+          unbindShortcut?.()
+        }
       } catch (err) {
         if (generation === attachGeneration.current) {
           setConn('error')
