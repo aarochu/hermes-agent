@@ -410,6 +410,7 @@ def _get_or_create_env(task_id: str):
         _active_environments, _env_lock, _get_env_config, _last_activity,
         _start_cleanup_thread, _creation_locks, _creation_locks_lock, _task_env_overrides,
         _resolve_container_task_id, _resolve_task_host_cwd, _is_container_backend, _select_image,
+        _container_fallback_cwd, _is_unusable_container_cwd,
     )
     effective_task_id = _resolve_container_task_id(task_id)
     def _cached():
@@ -435,15 +436,21 @@ def _get_or_create_env(task_id: str):
             # Shared shaper: execute_code's own key subset dropped docker_extra_args / docker_forward_env /
             # docker_env, so a sandbox created from this path lost the operator's configured settings.
             container_config = _container_config_from_config(config)
+        host_cwd = _resolve_task_host_cwd(config, task_id)
+        cwd = overrides.get("cwd") or config["cwd"]
+        # Same guard as the terminal and file tools: a host path without this task's bind is no
+        # container workdir (``docker run -w C:\...`` exits 125, #135257).
+        if _is_container_backend(env_type) and not host_cwd and _is_unusable_container_cwd(cwd):
+            cwd = _container_fallback_cwd(config, env_type, host_cwd)
         logger.info("Creating new %s environment for execute_code task %s...",
                      env_type, effective_task_id[:8])
         env = _create_environment(
             env_type=env_type, image=_select_image(env_type, overrides, config),
-            cwd=overrides.get("cwd") or config["cwd"], timeout=config["timeout"],
+            cwd=cwd, timeout=config["timeout"],
             ssh_config=_ssh_config_from_config(config) if env_type == "ssh" else None,
             container_config=container_config,
             local_config={"persistent": config.get("local_persistent", False)} if env_type == "local" else None,
-            task_id=effective_task_id, host_cwd=_resolve_task_host_cwd(config, task_id),
+            task_id=effective_task_id, host_cwd=host_cwd,
         )
         with _env_lock:
             _active_environments[effective_task_id] = env

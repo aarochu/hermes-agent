@@ -272,7 +272,7 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
     so a file tool that runs before any terminal command still gets the configured backend."""
     from tools.terminal_tool_config import _is_container_backend, coerce_ssh_remote_cwd
     from tools.terminal_tool import (
-        _create_configured_env, _get_env_config, _is_mounted_host_cwd, _is_unusable_container_cwd,
+        _container_fallback_cwd, _create_configured_env, _get_env_config, _is_mounted_host_cwd, _is_unusable_container_cwd,
         _resolve_task_host_cwd, _select_image, get_session_cwd, resolve_task_overrides)
 
     config = _get_env_config()
@@ -294,7 +294,7 @@ def _create_terminal_env_for_file_ops(raw_task_id: str, task_id: str):
     # back to the already-validated config["cwd"] so the override can't bypass the guard.
     host_cwd = _resolve_task_host_cwd(config, raw_task_id)
     if _is_container_backend(env_type) and _is_unusable_container_cwd(cwd, mounted_host=host_cwd):
-        fallback = "/workspace" if _is_mounted_host_cwd(cwd, host_cwd) else config["cwd"]
+        fallback = "/workspace" if _is_mounted_host_cwd(cwd, host_cwd) else _container_fallback_cwd(config, env_type, host_cwd)
         if cwd != fallback:
             logger.info(
                 "Ignoring host/relative cwd override %r for %s backend "

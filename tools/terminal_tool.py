@@ -591,15 +591,19 @@ def _resolve_task_host_cwd(config: dict[str, Any], task_id: Optional[str]) -> Op
     fresh session's mount from it would leak the previous session's directory.
     Overrides tagged ``cwd_source: "process"`` are refused for the same reason;
     ``cwd_source: "session"`` or untagged (ACP/RL) overrides mount.
-    A Windows drive path is not a mount source while the cwd-to-/workspace flag
-    is off. A raw host override must stay out of ``docker run -w`` and fall
-    back to the sanitized config cwd. The Windows bind, including when
-    ``/workspace`` is already claimed, is the volume mount, not this override.
+    While the cwd-to-/workspace flag is off, only the configured Windows drive
+    workspace mounts: ``_resolve_config_cwd`` binds it because it cannot exist
+    inside the Linux container (#135257), under the same session rule. A raw
+    host override never mounts; it falls back to the sanitized config cwd.
     """
-    if config.get("env_type") != "docker" or not config.get("docker_mount_cwd_to_workspace"):
+    if config.get("env_type") != "docker":
         return None
     # Top-level CLI parent ("default") is a single-session process — legacy behavior.
-    if not _docker_session_isolation_enabled() or _resolve_container_task_id(task_id) == "default":
+    shared = not _docker_session_isolation_enabled() or _resolve_container_task_id(task_id) == "default"
+    if not config.get("docker_mount_cwd_to_workspace"):
+        host = config.get("host_cwd")
+        return host if shared and isinstance(host, str) and _is_windows_drive_path(host) else None
+    if shared:
         return config.get("host_cwd")
     overrides = resolve_task_overrides(task_id)
     candidate = overrides.get("cwd")
@@ -667,6 +671,14 @@ def _ensure_terminal_env_bridged() -> None:
 
 # Default cwd per backend; anything else (container backends, plugins) is "/root".
 _DEFAULT_CWD_BY_BACKEND = {"ssh": "~", "vercel_sandbox": _VERCEL_SANDBOX_DEFAULT_CWD}
+
+
+def _container_fallback_cwd(config: dict[str, Any], env_type: str, host_cwd: Optional[str]) -> str:
+    """The sanitized ``config["cwd"]`` a container falls back to when a raw cwd is unusable. A Windows
+    workspace config cwd only works through its bind, so without one it is the backend default (#135257)."""
+    if not host_cwd and _is_host_cwd(config["cwd"]):
+        return _DEFAULT_CWD_BY_BACKEND.get(env_type, "/root")
+    return config["cwd"]
 
 
 def _resolve_config_cwd(env_type: str, mount_docker_cwd: bool) -> tuple:
@@ -1124,7 +1136,7 @@ def _plan_execution(
     # remap to /workspace instead of discarding it. Mount equality is part of
     # the unusable check so /mnt and /srv are not left as the container cwd.
     if _is_container_backend(env_type) and _is_unusable_container_cwd(cwd, mounted_host=host_cwd):
-        remapped = "/workspace" if host_cwd else config["cwd"]
+        remapped = "/workspace" if host_cwd else _container_fallback_cwd(config, env_type, host_cwd)
         if cwd != remapped:
             logger.info(
                 "Remapping host/relative cwd override %r for %s backend "
